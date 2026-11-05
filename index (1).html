@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>2026년 잔여 연차 조회</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <h1>2026년 잔여 연차 조회</h1>
+  <p class="sub">이름과 생년월일을 입력하면 내 연차 현황을 확인할 수 있어요.</p>
+  <section class="panel" id="search">
+    <label for="name">이름</label>
+    <input id="name" type="text" autocomplete="off" placeholder="홍길동">
+    <label for="birth">생년월일</label>
+    <input id="birth" type="date" min="1940-01-01" max="2010-12-31">
+    <div class="err" id="err" role="alert"></div>
+    <button id="go" type="button">조회하기</button>
+  </section>
+  <section class="panel" id="result" hidden>
+    <p class="hello" id="rName"></p>
+    <p class="hire" id="rHire"></p>
+    <div class="remain"><small>잔여 연차</small><strong id="rRemain"></strong><span>일</span></div>
+    <p class="note" id="rAsOf"></p>
+    <button class="ghost" id="back" type="button" style="margin-top:20px">다시 조회</button>
+  </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const enc = new TextEncoder(), dec = new TextDecoder();
+const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+const norm = s => s.trim().replace(/\s+/g,"");
+const fmtDate = s => { const [y,m,d] = s.split("-"); return `${y}년 ${+m}월 ${+d}일`; };
+const fmtNum = n => Number.isInteger(n) ? String(n) : n.toFixed(1);
+let DATA = null;
+const loading = fetch("data.json", {cache:"no-store"}).then(r => r.json()).then(d => { DATA = d; }).catch(() => {});
+
+async function findRecord(name, birth){
+  const km = await crypto.subtle.importKey("raw", enc.encode(`${name}|${birth}`), "PBKDF2", false, ["deriveKey"]);
+  const key = await crypto.subtle.deriveKey({name:"PBKDF2", salt:enc.encode("leave2026-v1"), iterations:200000, hash:"SHA-256"}, km, {name:"AES-GCM", length:256}, false, ["decrypt"]);
+  for(const rec of DATA.records){
+    const [iv, ct] = rec.split(".");
+    try{ return JSON.parse(dec.decode(await crypto.subtle.decrypt({name:"AES-GCM", iv:unb64(iv)}, key, unb64(ct)))); }catch(_){}
+  }
+  return null;
+}
+let busy = false;
+async function lookup(){
+  if(busy) return;
+  const name = norm($("name").value), birth = $("birth").value;
+  if(!name || !birth){ $("err").textContent = "이름과 생년월일을 모두 입력해 주세요."; return; }
+  if(!(window.crypto && crypto.subtle)){ $("err").textContent = "이 브라우저에서는 조회할 수 없습니다. 최신 브라우저를 사용해 주세요."; return; }
+  busy = true; $("go").textContent = "조회 중…";
+  try{
+    await loading;
+    if(!DATA){ $("err").textContent = "데이터를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요."; return; }
+    const e = await findRecord(name, birth);
+    if(!e){ $("err").textContent = "일치하는 직원 정보가 없습니다. 입력 내용을 확인하거나 인사팀에 문의해 주세요."; return; }
+    $("err").textContent = "";
+    $("rName").textContent = `${e.name} ${e.title}님`;
+    $("rHire").textContent = `입사일 ${fmtDate(e.hire)}`;
+    $("rRemain").textContent = fmtNum(e.remain);
+    $("rAsOf").textContent = `${fmtDate(DATA.asof)} 기준 · 내용이 다르면 인사팀에 문의해 주세요.`;
+    $("search").hidden = true; $("result").hidden = false;
+  }finally{ busy = false; $("go").textContent = "조회하기"; }
+}
+$("go").addEventListener("click", lookup);
+$("back").addEventListener("click", () => { $("name").value = ""; $("birth").value = ""; $("result").hidden = true; $("search").hidden = false; $("name").focus(); });
+["name","birth"].forEach(id => $(id).addEventListener("keydown", ev => { if(ev.key === "Enter") lookup(); }));
+</script>
+</body>
+</html>
