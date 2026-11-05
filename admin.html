@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>연차 관리자</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <h1>연차 관리자</h1>
+  <p class="sub">직원 정보를 수정하면 GitHub의 data.json에 바로 저장됩니다.</p>
+
+  <section class="panel" id="conn">
+    <h2>1. GitHub 연결</h2>
+    <div class="row">
+      <div><label for="owner">계정(Owner)</label><input id="owner" autocomplete="off"></div>
+      <div><label for="repo">저장소(Repo)</label><input id="repo" autocomplete="off"></div>
+    </div>
+    <label for="branch">브랜치</label>
+    <input id="branch" value="main" autocomplete="off">
+    <label for="token">액세스 토큰 (이 페이지를 닫으면 사라져요)</label>
+    <input id="token" type="password" autocomplete="off" placeholder="github_pat_…">
+    <div class="err" id="cMsg" role="status"></div>
+    <button id="connect" type="button">연결하고 데이터 불러오기</button>
+  </section>
+
+  <section class="panel" id="editor" hidden>
+    <h2>2. 직원 수정·등록 <span id="count" style="font-weight:400;color:var(--muted)"></span></h2>
+    <div class="row">
+      <div><label for="aName">이름</label><input id="aName" autocomplete="off"></div>
+      <div><label for="aBirth">생년월일</label><input id="aBirth" type="date"></div>
+    </div>
+    <button class="ghost" id="aLoad" type="button" style="margin:0 0 16px">불러오기</button>
+    <div class="row">
+      <div><label for="aTitle">직위</label><input id="aTitle" autocomplete="off"></div>
+      <div><label for="aHire">입사일</label><input id="aHire" type="date"></div>
+    </div>
+    <label for="aRemain">잔여 연차(일, 반차는 0.5)</label>
+    <input id="aRemain" type="number" min="0" step="0.5" inputmode="decimal">
+    <div class="err" id="aMsg" role="status"></div>
+    <button id="aSave" type="button">저장</button>
+    <p class="note">저장 후 사이트에 반영되기까지 1~2분 걸릴 수 있어요.</p>
+  </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const enc = new TextEncoder(), dec = new TextDecoder();
+const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+const b64 = u => btoa(String.fromCharCode(...u));
+const norm = s => s.trim().replace(/\s+/g,"");
+const say = (id, t, ok) => { $(id).textContent = t; $(id).className = "err" + (ok ? " ok" : ""); };
+
+/* github.io 주소면 계정/저장소 자동 입력 */
+try{
+  if(location.hostname.endsWith(".github.io")){
+    $("owner").value = location.hostname.split(".")[0];
+    $("repo").value = location.pathname.split("/")[1] || "";
+  }
+}catch(_){}
+
+let cfg = null, sha = null, DATA = null;
+async function gh(method, body){
+  const url = `https://api.github.com/repos/${cfg.owner}/${cfg.repo}/contents/data.json` + (method === "GET" ? `?ref=${encodeURIComponent(cfg.branch)}&t=${Date.now()}` : "");
+  const r = await fetch(url, {method, headers:{Authorization:`Bearer ${cfg.token}`, Accept:"application/vnd.github+json"}, body: body ? JSON.stringify(body) : undefined});
+  if(!r.ok){ const e = new Error("gh"); e.status = r.status; throw e; }
+  return r.json();
+}
+function ghError(e){
+  if(e.status === 401) return "토큰이 올바르지 않거나 만료됐습니다.";
+  if(e.status === 403) return "이 토큰에 저장소 쓰기(Contents: Read and write) 권한이 없습니다.";
+  if(e.status === 404) return "저장소나 data.json을 찾을 수 없습니다. 계정·저장소·브랜치를 확인해 주세요.";
+  if(e.status === 409 || e.status === 422) return "다른 곳에서 먼저 수정됐습니다. 다시 연결한 뒤 시도해 주세요.";
+  return "GitHub와 통신하지 못했습니다. 네트워크를 확인해 주세요.";
+}
+async function load(){
+  const res = await gh("GET");
+  sha = res.sha;
+  DATA = JSON.parse(dec.decode(unb64(res.content.replace(/\s/g,""))));
+  $("count").textContent = `(등록 ${DATA.records.length}명)`;
+}
+$("connect").addEventListener("click", async () => {
+  cfg = { owner:$("owner").value.trim(), repo:$("repo").value.trim(), branch:$("branch").value.trim() || "main", token:$("token").value.trim() };
+  if(!cfg.owner || !cfg.repo || !cfg.token){ say("cMsg", "계정, 저장소, 토큰을 모두 입력해 주세요."); return; }
+  $("connect").disabled = true; say("cMsg", "불러오는 중…", true);
+  try{ await load(); say("cMsg", "연결됐어요.", true); $("editor").hidden = false; }
+  catch(e){ say("cMsg", ghError(e)); }
+  finally{ $("connect").disabled = false; }
+});
+
+async function deriveKey(name, birth, usage){
+  const km = await crypto.subtle.importKey("raw", enc.encode(`${name}|${birth}`), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey({name:"PBKDF2", salt:enc.encode("leave2026-v1"), iterations:200000, hash:"SHA-256"}, km, {name:"AES-GCM", length:256}, false, usage);
+}
+async function findRecord(name, birth){
+  const key = await deriveKey(name, birth, ["decrypt"]);
+  for(let i = 0; i < DATA.records.length; i++){
+    const [iv, ct] = DATA.records[i].split(".");
+    try{ return { idx:i, data:JSON.parse(dec.decode(await crypto.subtle.decrypt({name:"AES-GCM", iv:unb64(iv)}, key, unb64(ct)))) }; }catch(_){}
+  }
+  return null;
+}
+async function encryptRecord(name, birth, obj){
+  const key = await deriveKey(name, birth, ["encrypt"]);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({name:"AES-GCM", iv}, key, enc.encode(JSON.stringify(obj)));
+  return b64(iv) + "." + b64(new Uint8Array(ct));
+}
+$("aLoad").addEventListener("click", async () => {
+  const name = norm($("aName").value), birth = $("aBirth").value;
+  if(!name || !birth){ say("aMsg", "이름과 생년월일을 입력해 주세요."); return; }
+  const r = await findRecord(name, birth);
+  if(!r){ say("aMsg", "등록된 직원이 없습니다. 아래 내용을 입력하고 저장하면 새로 등록돼요."); return; }
+  $("aTitle").value = r.data.title; $("aHire").value = r.data.hire; $("aRemain").value = r.data.remain;
+  say("aMsg", "불러왔어요. 잔여 연차를 수정한 뒤 저장하세요.", true);
+});
+$("aSave").addEventListener("click", async () => {
+  const name = norm($("aName").value), birth = $("aBirth").value;
+  const title = $("aTitle").value.trim(), hire = $("aHire").value, remain = parseFloat($("aRemain").value);
+  if(!name || !birth || !title || !hire || !(remain >= 0)){ say("aMsg", "모든 항목을 올바르게 입력해 주세요."); return; }
+  $("aSave").disabled = true; say("aMsg", "저장 중…", true);
+  try{
+    const found = await findRecord(name, birth);
+    const rec = await encryptRecord(name, birth, { title, name, hire, remain });
+    const records = DATA.records.slice();
+    if(found) records[found.idx] = rec; else records.push(rec);
+    const d = new Date(), asof = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+    const json = JSON.stringify({ asof, records }, null, 1);
+    const res = await gh("PUT", { message:`연차 수정 (${asof})`, content:btoa(json), sha, branch:cfg.branch });
+    sha = res.content.sha; DATA = { asof, records };
+    $("count").textContent = `(등록 ${records.length}명)`;
+    say("aMsg", found ? "수정해서 저장했어요." : "새 직원을 등록했어요.", true);
+  }catch(e){ say("aMsg", e.status ? ghError(e) : "저장하지 못했습니다. 다시 시도해 주세요."); }
+  finally{ $("aSave").disabled = false; }
+});
+</script>
+</body>
+</html>
